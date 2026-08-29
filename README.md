@@ -51,3 +51,6 @@ Organize your project directory as follows before running the script:
 3. Run the script:
    ```powershell
    .\geotag.ps1
+
+## Disclaimer
+This project is an independent open-source tool and is not affiliated, associated, authorized, endorsed by, or in any way officially connected with Snap Inc. or Snapchat.
