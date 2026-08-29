@@ -38,3 +38,16 @@ Organize your project directory as follows before running the script:
 │   └── snap_map_places_history.json      # Extracted from your Snapchat Data Export
 ├── 📄 exiftool.exe                       # ExifTool executable
 └── 📄 geotag.ps1                         # This script
+```
+
+## How to Use
+
+1. Open PowerShell and navigate to your project directory:
+   ```powershell
+   cd X:\Path\To\ProjectFolder
+2. Set the execution policy for the current session:
+   ```powershell
+   Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+3. Run the script:
+   ```powershell
+   .\geotag.ps1
