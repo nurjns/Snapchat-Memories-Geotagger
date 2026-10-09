@@ -1,43 +1,28 @@
-﻿<#
-Version 1.0 - 29.08.2026 - @nurjns
+<#
+Version 1.1.0 - 09.10.2026 - @nurjns
 #>
 
 # Pfade
 $sourceFolder = 'memories'
 $targetFolder = 'memories_geotagged'
-$jsonFile = 'json\snap_map_places_history.json'
+$jsonFile = 'json\memories_history.json'
 $exiftool = '.\exiftool.exe'
+
+# Maximale Abweichung in Sekunden fuer die automatische Zuordnung
+$toleranceSeconds = 5
+
+$invariant = [System.Globalization.CultureInfo]::InvariantCulture
 
 # Ordner erstellen, falls nicht vorhanden
 if (-not (Test-Path $targetFolder)) {
 	New-Item -ItemType Directory -Path $targetFolder | Out-Null
-	Write-Host "📁 Zielordner wurde erstellt: $targetFolder"
-}
-
-# Funktion für Umlaut-Konvertierung
-function ConvertUmlautsAndUrlEncode {
-	param([string]$str)
-	
-	# Komma entfernen
-	$str = $str -replace ',', ''
-
-	# Umlaute ersetzen
-	$str = $str -replace 'ü', 'ue'
-	$str = $str -replace 'Ü', 'Ue'
-	$str = $str -replace 'ä', 'ae'
-	$str = $str -replace 'Ä', 'Ae'
-	$str = $str -replace 'ö', 'oe'
-	$str = $str -replace 'Ö', 'Oe'
-	$str = $str -replace 'ß', 'ss'
-
-	# Leerzeichen zu %20 (keine weitere URL-Kodierung)
-	return $str -replace ' ', '%20'
+	Write-Host "Zielordner wurde erstellt: $targetFolder"
 }
 
 # JSON laden mit UTF8-Encoding
 $jsonRaw = Get-Content $jsonFile -Raw -Encoding utf8
 $json = $jsonRaw | ConvertFrom-Json
-$history = $json.'Snap Map Places History'
+$history = $json.'Saved Media' | Where-Object { $_.'Media Type' -eq 'Image' }
 
 # Alle JPG- und PNG-Dateien laden (ohne -overlay)
 $files = Get-ChildItem -Path $sourceFolder | Where-Object {
@@ -45,27 +30,25 @@ $files = Get-ChildItem -Path $sourceFolder | Where-Object {
 }
 
 # Startpunkt-Abfrage (Dateiname oder Datum)
-$startInput = Read-Host '🔁 Falls du ab einer bestimmten Datei oder einem Datum (YYYY-MM-DD) weitermachen willst, gib es ein (oder Enter für Start ab Anfang)'
+$startInput = Read-Host 'Falls du ab einer bestimmten Datei oder einem Datum (YYYY-MM-DD) weitermachen willst, gib es ein (oder Enter fuer Start ab Anfang)'
 $startFound = [string]::IsNullOrWhiteSpace($startInput)
 $startAtFile = ''
 
 if (-not $startFound) {
 	if ($startInput -match '^\d{4}-\d{2}-\d{2}$') {
-		# Start per Datum
 		$match = $files | Where-Object { $_.BaseName -like "$startInput*" } | Select-Object -First 1
 		if ($match) {
 			$startAtFile = $match.Name
-			Write-Host '📆 Beginne ab erster Datei mit Datum' $startInput ':' $startAtFile
+			Write-Host 'Beginne ab erster Datei mit Datum' $startInput ':' $startAtFile
 		} else {
-			Write-Host '❗️Keine Datei mit Datum' $startInput 'gefunden. Starte trotzdem ganz normal.'
+			Write-Host 'Keine Datei mit Datum' $startInput 'gefunden. Starte von vorne.'
 			$startFound = $true
 		}
 	} else {
-		# Start per Dateiname
 		if ($files.Name -contains $startInput) {
 			$startAtFile = $startInput
 		} else {
-			Write-Host "❗️Datei '$startInput' wurde im Quellordner nicht gefunden. Starte trotzdem ganz normal."
+			Write-Host "Datei '$startInput' wurde im Quellordner nicht gefunden. Starte von vorne."
 			$startFound = $true
 		}
 	}
@@ -81,132 +64,157 @@ foreach ($file in $files) {
 		}
 	}
 
-	Write-Host "`n➡️ Verarbeite Datei: $($file.Name)"
+	Write-Host "`n-> Verarbeite Datei: $($file.Name)"
 
-	# Ziel-Datei prüfen
 	$targetFile = Join-Path $targetFolder ($file.BaseName + '_geotagged.jpg')
 	if (Test-Path $targetFile) {
-		Write-Host "⚠️  $($file.Name) wurde bereits verarbeitet. Überspringe."
+		Write-Host "WARNUNG: $($file.Name) wurde bereits verarbeitet. Ueberspringe."
 		continue
 	}
 
-	# Datum aus Dateiname extrahieren
 	$datePart = $file.BaseName -split '_' | Select-Object -First 1
 	if (-not ($datePart -match '^\d{4}-\d{2}-\d{2}$')) {
-		Write-Host "❌ Ungültiges Datumsformat im Dateinamen: $($file.Name)"
+		Write-Host "FEHLER: Ungueliges Datumsformat im Dateinamen: $($file.Name)"
 		continue
 	}
 
-	# Einträge für Datum filtern
-	$matchingEntries = $history | Where-Object { ($_.Date -split ' ')[0] -eq $datePart }
+	$matchingEntries = @($history | Where-Object { ($_.Date -split ' ')[0] -eq $datePart })
 	if ($matchingEntries.Count -eq 0) {
-		Write-Host "❌ Keine Einträge für $($file.Name) gefunden."
+		Write-Host "FEHLER: Keine Eintraege fuer $($file.Name) gefunden."
 		continue
 	}
 
-	# Foto öffnen (Standardprogramm)
-	$photoProcess = Start-Process -FilePath $file.FullName -PassThru
+	# Zeitstempel-Kandidaten der Datei
+	$fileTimes = @(
+		$file.LastWriteTime
+		$file.LastWriteTimeUtc
+		$file.CreationTime
+		$file.CreationTimeUtc
+	)
 
-	if ($matchingEntries.Count -gt 1) {
-		Write-Host "📅 Mehrere Einträge für $datePart gefunden"
-		for ($i = 0; $i -lt $matchingEntries.Count; $i++) {
-			$entry = $matchingEntries[$i]
-			Write-Host ($i+1) ':' $entry.Place '–' $entry.'Place Location' '–' $entry.Date
+	# Automatische Zuordnung ueber den Zeitstempel
+	$selected = $null
+	$bestDiff = $null
+
+	foreach ($entry in $matchingEntries) {
+		if ([string]::IsNullOrWhiteSpace($entry.Location)) {
+			continue
 		}
-		$choice = Read-Host '❓ Nummer auswählen oder (s)kip'
 
-		# Foto schließen
-		try {
-			Start-Sleep -Seconds 1
-			$photoProcess.CloseMainWindow() | Out-Null
-			Start-Sleep -Seconds 1
-			if (!$photoProcess.HasExited) { $photoProcess.Kill() }
-		} catch {}
+		$entryTime = [datetime]::ParseExact($entry.Date.Replace(' UTC', ''), 'yyyy-MM-dd HH:mm:ss', $invariant, [System.Globalization.DateTimeStyles]::None)
 
-		if ($choice -eq 's') {
-			Write-Host '⏩ Übersprungen.'
-			if (Test-Path $targetFile) {
-				Remove-Item -Path $targetFile -Force
-				Write-Host "🗑️ Vorhandene Datei $targetFile gelöscht."
+		foreach ($fileTime in $fileTimes) {
+			$diff = [math]::Abs(($entryTime - $fileTime).TotalSeconds)
+			if ($diff -le $toleranceSeconds -and ($null -eq $bestDiff -or $diff -lt $bestDiff)) {
+				$bestDiff = $diff
+				$selected = $entry
 			}
-			continue
 		}
+	}
 
-	if ($choice -match '^\d+$' -and [int]$choice -ge 1 -and [int]$choice -le $matchingEntries.Count) {
-		$selected = $matchingEntries[[int]$choice - 1]
+	if ($null -ne $selected) {
+		Write-Host ('Automatischer Treffer (' + [math]::Round($bestDiff, 1) + 's Abweichung):') $selected.Location '-' $selected.Date
 	} else {
-		Write-Host '❌ Ungültige Eingabe. Überspringe.'
+		$photoProcess = Start-Process -FilePath $file.FullName -PassThru
+
+		if ($matchingEntries.Count -gt 1) {
+			Write-Host "Kein automatischer Treffer. Mehrere Eintraege fuer $datePart gefunden:"
+			for ($i = 0; $i -lt $matchingEntries.Count; $i++) {
+				Write-Host ($i + 1) ':' $matchingEntries[$i].Location '-' $matchingEntries[$i].Date
+			}
+			$choice = Read-Host 'Nummer auswaehlen oder (s)kip'
+
+			try {
+				Start-Sleep -Seconds 1
+				$photoProcess.CloseMainWindow() | Out-Null
+				Start-Sleep -Seconds 1
+				if (-not $photoProcess.HasExited) { $photoProcess.Kill() }
+			} catch {}
+
+			if ($choice -eq 's') {
+				Write-Host 'Uebersprungen.'
+				if (Test-Path $targetFile) {
+					Remove-Item -Path $targetFile -Force
+				}
+				continue
+			}
+
+			if ($choice -match '^\d+$' -and [int]$choice -ge 1 -and [int]$choice -le $matchingEntries.Count) {
+				$selected = $matchingEntries[[int]$choice - 1]
+			} else {
+				Write-Host 'Ungueltige Eingabe. Ueberspringe.'
+				continue
+			}
+		} else {
+			$selected = $matchingEntries[0]
+			Write-Host 'Eintrag gefunden:' $selected.Location '-' $selected.Date
+			$confirm = Read-Host 'Verwenden? (y/n)'
+
+			try {
+				Start-Sleep -Seconds 1
+				$photoProcess.CloseMainWindow() | Out-Null
+				Start-Sleep -Seconds 1
+				if (-not $photoProcess.HasExited) { $photoProcess.Kill() }
+			} catch {}
+
+			if ($confirm.ToLower() -ne 'y') {
+				Write-Host 'Foto uebersprungen.'
+				continue
+			}
+		}
+	}
+
+	# Koordinaten aus dem Location-Feld holen (die beiden Zahlen am Ende)
+	if ($selected.Location -notmatch '(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*$') {
+		Write-Host 'FEHLER: Standortangabe nicht lesbar:' $selected.Location
 		continue
 	}
-	} else {
-		$selected = $matchingEntries[0]
-		Write-Host '📍 Eintrag gefunden:' $selected.Place '–' $selected.'Place Location'
-		$confirm = Read-Host '✅ Verwenden? (y/n)'
 
-		# Foto schließen
-		try {
-			Start-Sleep -Seconds 1
-			$photoProcess.CloseMainWindow() | Out-Null
-			Start-Sleep -Seconds 1
-			if (!$photoProcess.HasExited) { $photoProcess.Kill() }
-		} catch {}
+	$lat = [math]::Round([double]::Parse($matches[1], $invariant), 6)
+	$lon = [math]::Round([double]::Parse($matches[2], $invariant), 6)
 
-		if ($confirm.ToLower() -ne 'y') {
-			Write-Host '⏩ Foto übersprungen.'
-			continue
-		}
-	}
-
-	# API-Abfrage vorbereiten
-	$placeQuery = "$($selected.Place) $($selected.'Place Location')"
-	$encodedQuery = ConvertUmlautsAndUrlEncode $placeQuery
-	$apiUrl = 'https://photon.komoot.io/api/?q=' + $encodedQuery
-
-	Write-Host '🔗 API-URL:' $apiUrl
-
-	try {
-		$response = Invoke-RestMethod -Uri $apiUrl -UseBasicParsing
-		if ($response.features.Count -eq 0) {
-			Write-Host '❌ Keine Koordinaten gefunden.'
-			continue
-		}
-		$coords = $response.features[0].geometry.coordinates
-		$lon = [math]::Round($coords[0], 3)
-		$lat = [math]::Round($coords[1], 3)
-		Write-Host "🌍 Gefundene Koordinaten: $lat, $lon"
-	} catch {
-		Write-Host '❌ Fehler bei API-Anfrage:' $_
+	if ($lat -lt -90 -or $lat -gt 90 -or $lon -lt -180 -or $lon -gt 180) {
+		Write-Host "FEHLER: Koordinaten ausserhalb des gueltigen Bereichs: $lat, $lon"
 		continue
 	}
 
-	# Datum mit Uhrzeit aus JSON-Eintrag übernehmen und UTC+2 korrigieren
-	$utcString = $selected.Date.Replace(' UTC','')
-	$utcTime = [datetime]::ParseExact($utcString, 'yyyy-MM-dd HH:mm:ss', $null, [System.Globalization.DateTimeStyles]::AssumeUniversal)
+	# Immer mit Punkt formatieren, unabhaengig von der Systemsprache
+	$latArg = $lat.ToString('0.########', $invariant)
+	$lonArg = $lon.ToString('0.########', $invariant)
+	$latRef = if ($lat -ge 0) { 'N' } else { 'S' }
+	$lonRef = if ($lon -ge 0) { 'E' } else { 'W' }
+	Write-Host "Koordinaten: $latArg, $lonArg"
+
+	$utcString = $selected.Date.Replace(' UTC', '')
+	$utcTime = [datetime]::ParseExact($utcString, 'yyyy-MM-dd HH:mm:ss', $invariant, [System.Globalization.DateTimeStyles]::AssumeUniversal)
 	$datetime = $utcTime.ToString('yyyy:MM:dd HH:mm:ss')
 
-	# Datei in Zielordner kopieren
 	Copy-Item -Path $file.FullName -Destination $targetFile -Force
 
-	# ExifTool-Befehl auf kopierte Datei
-	& $exiftool `
-		-quiet `
-		-overwrite_original `
-		"-GPSLatitude=$lat" `
-		"-GPSLatitudeRef=$(if ($lat -ge 0) {'N'} else {'S'})" `
-		"-GPSLongitude=$lon" `
-		"-GPSLongitudeRef=$(if ($lon -ge 0) {'E'} else {'W'})" `
-		"-DateTimeOriginal=$datetime" `
-		"-CreateDate=$datetime" `
-		"-ModifyDate=$datetime" `
-		"-FileModifyDate=$datetime" `
-		"-FileCreateDate=$datetime" `
-		"$targetFile"
+	$exifOutput = & $exiftool -overwrite_original "-GPSLatitude#=$latArg" "-GPSLatitudeRef=$latRef" "-GPSLongitude#=$lonArg" "-GPSLongitudeRef=$lonRef" "-DateTimeOriginal=$datetime" "-CreateDate=$datetime" "-ModifyDate=$datetime" "-FileModifyDate=$datetime" "-FileCreateDate=$datetime" "$targetFile" 2>&1
 
-	if ($LASTEXITCODE -eq 0) {
-		Write-Host '✅ Geotagging abgeschlossen:' $targetFile
+	$check = @(& $exiftool -s3 -n -GPSLatitude -GPSLongitude "$targetFile" 2>$null)
+	$verified = $false
+
+	if ($check.Count -eq 2) {
+		try {
+			$writtenLat = [double]::Parse($check[0], $invariant)
+			$writtenLon = [double]::Parse($check[1], $invariant)
+			$verified = ([math]::Abs($writtenLat - $lat) -lt 0.00001) -and ([math]::Abs($writtenLon - $lon) -lt 0.00001)
+		} catch {}
+	}
+
+	if ($verified) {
+		Write-Host 'Geotagging abgeschlossen:' $targetFile
 	} else {
-		Write-Host '❌ Fehler beim Schreiben der Metadaten.'
+		Write-Host 'FEHLER: Koordinaten wurden nicht korrekt geschrieben.'
+		Write-Host '  Erwartet:' $latArg $lonArg
+		Write-Host '  Gelesen: ' ($check -join ' / ')
+		if ($exifOutput) {
+			Write-Host '  exiftool:' ($exifOutput -join ' | ')
+		}
+		[console]::beep(200, 500)
 	}
 }
 
-[console]::beep(500,200)
+[console]::beep(500, 200)
