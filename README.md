@@ -3,17 +3,19 @@
 A PowerShell script to automatically restore missing GPS coordinates in downloaded Snapchat Memories. 
 
 ## The Problem
-Downloaded Snapchat Memories do not contain any embedded EXIF location metadata. As a result, gallery applications (such as Immich, Google Photos, or Apple Photos) cannot display where the photos were taken. 
+Downloaded Snapchat Memories do not contain any embedded EXIF location metadata. As a result, gallery applications (such as Google Photos or Apple Photos) cannot display where the photos were taken. 
 
-This script extracts recorded location history from your Snapchat JSON export and uses a geocoding API to inject precise EXIF GPS coordinates and timestamps back into the image files—provided you used a **Location / Venue Lens** when taking the snap.
+This script extracts recorded location data from your Snapchat JSON export and injects precise EXIF GPS coordinates and timestamps directly into the image files - provided the memory carries location data in the export.
+
+Coordinates are read straight from the export. Each image is matched to its location entry automatically by comparing the file timestamp against the entry time (±5 s, configurable); only if no match is found does the script open the photo and ask you to pick an entry manually. Every write is verified by reading the GPS tags back out of the file, so a success message means the coordinates are really there.
 
 ---
 
 ## Prerequisites
-* **Venue Lens Usage:** Snaps must have been captured using a Location/Venue Lens for Snapchat to log the place in `snap_map_places_history.json`.
-* **Snapchat Memories & JSON Export:** Requires `json/snap_map_places_history.json` and your downloaded photo files in the `memories/` directory.
+* **Venue Lens Usage:** Snaps must have been captured using a Location/Venue Lens for Snapchat to log the place in `memories_history.json`.
+* **Snapchat Memories & JSON Export:** Requires `json/memories_history.json` and your downloaded photo files in the `memories/` directory.
 * **[ExifTool](https://exiftool.org/)** — Download the Windows executable zip, extract it, rename `exiftool(-k).exe` to `exiftool.exe`, and place it in the script directory.
-* **PowerShell 5.1+** (Pre-installed on Windows 10/11).
+* **PowerShell 5.1+** (Pre-installed on Windows 11).
 
 ## How to Export Your Snapchat Data
 
@@ -32,10 +34,11 @@ Organize your project directory as follows before running the script:
 ```text
 📁 ProjectFolder/
 ├── 📁 memories/                          # Input folder containing downloaded photos
-│   ├── 2026-08-29_abc123-main.jpg
+│   ├── 2026-10-09_abc123-main.jpg
 │   └── ...
 ├── 📁 json/
-│   └── snap_map_places_history.json      # Extracted from your Snapchat Data Export
+│   └── memories_history.json      # Extracted from your Snapchat Data Export
+├── 📁 exiftool_files/                    # ExifTool helper files
 ├── 📄 exiftool.exe                       # ExifTool executable
 └── 📄 geotag.ps1                         # This script
 ```
